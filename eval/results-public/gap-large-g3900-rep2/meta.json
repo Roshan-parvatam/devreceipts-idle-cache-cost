@@ -1,0 +1,14 @@
+{
+  "cell": "gap",
+  "rep": 2,
+  "size_label": "large",
+  "gap_planned_s": 3900,
+  "gap_actual_s": 3900.1,
+  "claude_version": "2.1.325 (Claude Code)",
+  "started_at_utc": "2026-11-16T15:44:57Z",
+  "setup_wall_s": 2.9,
+  "resume_wall_s": 2.8,
+  "doc_chars": 147575,
+  "session_id": "sess-cb3d7ed1",
+  "resume_session_id": "sess-cb3d7ed1"
+}

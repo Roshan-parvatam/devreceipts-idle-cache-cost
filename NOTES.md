@@ -1,0 +1,44 @@
+# NOTES: failures, dead ends, fixes
+
+Format: what happened, then a one-line why. Add every error as it happens; these become the "what broke" segment.
+The build-phase entries below were written before any model call. The real pilot and full-run entries (16 Nov 2026) are further down; their numbers are in METRICS.md.
+
+## Design caveats (say these on camera)
+- **Headless `-p --resume` is not the interactive app.** The measurement is about this path.
+- **One account, one model, one effort level, n = 3.** Medians and ranges only.
+- **Your own Claude use warms the shared prefix.** Stay off Claude Code during the waits.
+- **`total_cost_usd` is a list-price estimate.** It says nothing about how the plan counts usage.
+- **Filler text is not code.** Chars-per-token is calibrated on it, not assumed to match real sessions.
+
+## Failures and fixes (build phase, 16 Nov 2026)
+- **The spend guard blocked harmless commands three times.** (1) A `cat` of the Video #1 eval script, (2) a heredoc that wrote the Makefile (its text contained `make pilot` and the script names), both with "this command spends plan allowance", and (3) a `grep` whose pattern text contained the flag `--bare` and `ANTHROPIC_API_KEY=` ("would bypass the plan login"). Why: `guard-spend.sh` matches those strings anywhere in the command text, not only in commands that run them. Fix: read and write those files with the Read/Write tools, and rely on `test_scripts_never_use_bare_or_set_an_api_key` for the flag check; `.claude/allow-spend` was not created.
+- **Design flaw caught before any run: the handoff's "fixed document" would let sessions warm each other.** Why: prompt caching is a prefix match, so identical documents share cache entries across sessions. Fix: one unique document per session (seed in line 1), tested in `tests/test_gen_context.py`.
+- **Design flaw caught before any run: the "miss = cache_creation >= 90% of setup total" rule cannot fire in a small cell.** Why: the shared system/tool prefix (the allowance-planner assumed about 10-15k tokens, unmeasured) stays warm, so a fully rewritten document is only part of the total. Fix: measure a miss against the document part (total minus the hello-call floor); identical to the old rule when the floor is 0.
+- **Script tests passed on their first run, so they were not proven to fail.** Why: the two Python modules were missing at the first red run, which stopped collection before the script tests executed. Fix: mutation check. Removing the `unset ANTHROPIC_API_KEY` line made 2 tests fail; making the STOP file never get written made 3 tests fail; restored, 38 pass.
+
+## Failures and fixes (real pilot, 16 Nov 2026)
+- **Three of four pilot sessions never started.** The floor call measured 15,583 input tokens, above the 15,000-token "small" target, so there was no room for a document; the script printed "target 15000 tokens is not above the measured floor 15583" three times and made no calls (nothing spent). Why: I guessed the floor at about 12k from Video #1's first call; the real empty-project call is 15,583 (2 plain + 6,517 written + 9,064 read). Fix: both targets are checked right after the floor is known and the script stops before any call; `TARGET_SMALL=25000` for the rerun; `ONLY=` reruns chosen sessions.
+- **The filler text is not 4 characters per token.** The first large session (document sized at 4.0 chars/token for a 60k target) came back at 69,355 setup tokens. Calibrating on that one call gives about 3.30 chars/token (`sizes.env`, one data point). Why: random-word prose tokenizes shorter than ordinary English. Fix: CPT 3.304 for later documents; re-calibrate from all finished setups.
+- **The $0.80 pilot cap was too low.** The planner's range assumed a cheaper cache write. The CLI's `total_cost_usd` reproduces exactly with input $2, 1-hour cache write $4, cache read $0.10, output $10 per million tokens (floor call and large setup both match), so a 60k write costs about $0.24 at list price. Raised the pilot cap to $1.50 for the rerun (list-price estimate, not a bill).
+- **Rewrote a running script safely.** The runner was edited while a background job was executing it; bash reads scripts by offset, so the file was replaced with a copy and `mv` (new inode) instead of an in-place edit.
+
+- **Stop rule 4 tripped on the first two pilot resumes (not yet resolved).** Small gap 0: setup total 26,863 tokens, resume cache_read 20,846 + cache_creation 6,449 = 77.6% read. Small gap 6 min: setup total 24,889, resume cache_read 20,780 + cache_creation 4,140 = 83.5% read. Both score "partial" under the fixed "hit = read >= 90% of setup total" rule, and gap 0 fails the sanity check. Why (observed, cause unproven): every resume re-writes a few thousand tokens that were not read from cache, even with no gap (the floor call also wrote 6,517 session-specific tokens, so a per-session block of that size is the suspect). n=1 per cell; the 6-minute resume read as much as the 0-minute one (20,780 vs 20,846), so the cached document did not expire at 6 minutes. Resolved (16 Nov 2026, after the large session's 65-minute resume, small 65 still pending): the hit rule now compares each resume with the gap-0 control of the same size, and the gap-0 sanity check asks for the document to be read from cache; recorded in PLAN.md as a post-pilot revision. The 65-minute large resume read 9,064 (the shared prefix) and wrote 60,322, so the revised rule labels it a miss while the 0- and 6-minute small ones are hits. Also seen: two small sessions with the same document size had setup creation of 17,797 and 15,823 tokens (about 2k apart), unexplained.
+
+- **The cost cap double-counted, and a resume's `total_cost_usd` is not its own cost.** The large 65-minute resume reported $0.484 against a $0.242 setup, yet its own tokens (60,322 written at the $4 per million tokens rate, 9,064 read) price at about $0.242. The same holds for all three finished resumes: the resume's number is the whole session so far. Why: the CLI reports cost for the session, and `--resume` continues that session. The old cap summed every file, so the full run's $5 cap would have tripped early. Fix: count the largest total per session once (`total_cost` in `lib.sh`), own cost = resume total minus setup total in `analyze.py`; both tested.
+- **Cosmetic bug: "finished WITH A STOP: ." with no STOP file.** The pilot's first job printed it because three small sessions had failed to size their documents (no STOP is written for that case). Why: the final message treats any failed session as a STOP. Fix: to be reworded once the running jobs finish (the script cannot be edited while bash is executing it).
+
+## Risks to watch in the real run (not failures yet)
+- A sleeping Mac stretches the gaps: both planned and actual gap are logged.
+- `-p` reading the prompt from stdin and `--resume` keeping the same session id are assumptions the pilot checks.
+- The Video #1 result file shows all cache writes in the 1-hour field; if that holds, the "5-minute break" claim may be false (that would be the finding).
+
+## Full run (16 Nov 2026): no failures, one surprise
+- **No call failed and no stop rule fired** (24 gap sessions + 12-turn chain, no STOP file, actual gaps within 0.1 s of planned). Numbers are in METRICS.md.
+- **The "5-minute cache expiry" did not appear.** 6- and 55-minute resumes all hit; 65-minute resumes all missed. Why (observed, consistent with the 1-hour cache field that every write used): in this headless setup the break is between 55 and 65 minutes. This is the headline, not a failure.
+- **Every resume wrote about 4,140 tokens even on a hit.** Cause unknown; stays on the "not measured" list.
+
+## Video v2 cut (17 Nov 2026): build failures and fixes
+- **Characters drew a ghost copy of themselves while moving.** Why: Manim freezes the list of family members at the start of every play, and our characters rebuild their parts each frame, so the old parts kept being drawn. Fix: `Seg.get_moving_and_static_mobjects` hands the renderer the top-level objects (stage.py).
+- **Fixes did not show up in re-renders.** Why: Manim reused cached partial movies whose hash ignores updater-driven changes. Fix: caching disabled for these scenes.
+- **The new layout gate failed about 80 placements on the first pass** (text on the window, on the lamp, on characters, off the moving frame edge). Why: the room has fixed furniture and the camera moves, so hand-placed labels collide. Fix: every placement moved until the gate (kit/layout.py, tested in video/tests/test_layout.py) passes on every scene; the window was made smaller and moved right to free the middle wall.
+- **Grouped speech synthesis mis-split 4 sentence groups** (pace check failed). Why: a sentence with an inner full stop has its own long pause, which looked like a sentence boundary. Fix: those groups fall back to one call per sentence (logged by narration.py).
